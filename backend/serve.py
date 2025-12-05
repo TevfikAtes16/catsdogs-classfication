@@ -17,9 +17,12 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = (BASE_DIR / "../service/catsdogs.keras").resolve()
 
 app = FastAPI()
+
+# Geliştirme için geniş CORS (prod'da domainlerini özel yazarsın)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # prod'da domainini yaz
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -29,42 +32,73 @@ try:
 except Exception as e:
     raise RuntimeError(f"Model yüklenemedi: {MODEL_PATH}\n{e}")
 
-def preprocess(img: Image.Image):
-    # test_savedmodel.py ile birebir: SADECE resize (normalize yok!)
+
+def preprocess(img: Image.Image) -> np.ndarray:
+    """
+    test_savedmodel.py ile birebir: SADECE resize (normalize yok)
+    """
+    # EXIF'e göre döndür, RGB'ye çevir
     img = ImageOps.exif_transpose(img).convert("RGB")
     img = img.resize((IMG, IMG))
-    arr = tf.keras.utils.img_to_array(img)  # float32 [0,255] aralığında
-    x = np.expand_dims(arr, 0)              # [1, H, W, 3]
+
+    # float32 [0, 255] aralığında array
+    arr = tf.keras.utils.img_to_array(img)
+    x = np.expand_dims(arr, 0)  # [1, H, W, 3]
     return x
+
 
 @app.get("/")
 def root():
-    return {"message": "Cats & Dogs API up. Use POST /predict with form-data 'file'."}
+    return {
+        "message": "Cats & Dogs API up. Use POST /predict with form-data 'file'."
+    }
+
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    """
+    React Native tarafı:
+        form.append("file", { uri, name: "upload.jpg", type: "image/jpeg" })
+    şeklinde gönderiyor. Burada 'file' adıyla yakalıyoruz.
+    """
     try:
+        # Dosyayı oku
         raw = await file.read()
+        if not raw:
+            raise ValueError("Boş dosya alındı.")
+
+        # Pillow ile aç
         img = Image.open(io.BytesIO(raw))
         x = preprocess(img)
 
-        # testteki gibi tek örnek ve tek nöron/sigmoid kabulü
+        # Model çıktısı: tek örnek & tek nöron (sigmoid) varsayımı
         y = model.predict(x, verbose=0)
-        # y beklenen: shape [1,1] veya [1]; her durumda skaler çıkaralım
-        prob = float(np.squeeze(y))  # logit değilse direkt p; logit ise aşağıda sigmoid uygula
+        # y: [1,1] veya [1] → skaler
+        prob = float(np.squeeze(y))
 
-        # Güvenli olsun: eğer değer [0,1] dışında ise bu logittir → sigmoid uygula
+        # Güvenli olsun: eğer [0,1] aralığı dışındaysa, logit kabul edip sigmoid uygula
         if prob < 0.0 or prob > 1.0:
             prob = float(tf.nn.sigmoid(prob))
 
+        # 0.5 üzeri: dog, altı: cat
         label = "dog" if prob >= 0.5 else "cat"
-        conf = prob if label == "dog" else (1 - prob)
+        confidence = prob if label == "dog" else (1.0 - prob)
 
-        return {"class": label, "confidence": conf}
+        # React Native PredictScreen şunu bekliyor:
+        # result.class
+        # result.confidence
+        return {
+            "class": label,
+            "confidence": confidence,
+        }
 
     except Exception as e:
+        # Hata olursa 400 dön, RN tarafında Alert ile göreceksin
         raise HTTPException(status_code=400, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
+
+    # Docker içinde 0.0.0.0'a bağlanıyoruz ki -p ile dışarı açabilelim
     uvicorn.run(app, host="0.0.0.0", port=8000)

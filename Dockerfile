@@ -12,7 +12,6 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Kod ve model dosyası
 COPY backend /app/backend
-COPY service /app/service
 
 # Artık backend dizininde çalış
 WORKDIR /app/backend
